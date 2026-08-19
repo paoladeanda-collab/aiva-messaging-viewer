@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AIVA Messaging Agent Viewer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e6e8eb;
+    --muted: #9aa1ac;
+    --user: #2b3a55;
+    --assistant: #2b4a3a;
+    --tool: #4a3a2b;
+    --accent: #5b8def;
+    --error: #d95c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 4px; font-size: 18px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .controls {
+    display: flex;
+    gap: 8px;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  input[type="text"], input[type="password"] {
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  select {
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  button {
+    padding: 10px 18px;
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    color: white;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.secondary { background: var(--panel); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.6; cursor: default; }
+  main {
+    padding: 24px;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+  .status { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+  .status.error { color: var(--error); }
+  .breadcrumbs { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .breadcrumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    cursor: pointer;
+    background: var(--panel);
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .title { font-size: 14px; margin-bottom: 4px; }
+  .card .meta { font-size: 12px; color: var(--muted); }
+  .item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+  }
+  .item .meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .item.kind-tool_call, .item.kind-tool_execution { background: var(--tool); }
+  .item.kind-classifier, .item.kind-thread_detector { background: var(--user); }
+  .item.kind-response_generation, .item.kind-generation { background: var(--assistant); }
+  .item pre {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12.5px;
+    background: rgba(0,0,0,0.25);
+    padding: 8px;
+    border-radius: 6px;
+    max-height: 400px;
+    overflow: auto;
+  }
+  details summary { cursor: pointer; font-size: 13px; color: var(--muted); margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AIVA Messaging Agent Viewer</h1>
+  <p>Look up SMS/WhatsApp AI agent conversations and their full internal reasoning traces.</p>
+</header>
+<div class="controls">
+  <input type="password" id="accessCode" placeholder="Access code" style="max-width:160px" />
+  <input type="text" id="companyId" placeholder="Company ID" style="max-width:160px" />
+  <button id="loadAgentsBtn">Load agents</button>
+</div>
+<main>
+  <div id="status" class="status"></div>
+  <div id="breadcrumbs" class="breadcrumbs"></div>
+  <div id="content"></div>
+</main>
+
+<script>
+  // Fill this in after deploying the Cloudflare Worker (wrangler deploy prints the URL).
+  const WORKER_URL = "https://aiva-messaging-viewer.pdeandam98-59d.workers.dev";
+
+  const accessCodeInput = document.getElementById("accessCode");
+  const companyIdInput = document.getElementById("companyId");
+  const loadAgentsBtn = document.getElementById("loadAgentsBtn");
+  const statusEl = document.getElementById("status");
+  const breadcrumbsEl = document.getElementById("breadcrumbs");
+  const contentEl = document.getElementById("content");
+
+  // In-memory navigation state
+  let state = { companyId: null, agent: null, conversation: null, range: "7d" };
+
+  loadAgentsBtn.addEventListener("click", () => loadAgents());
+  companyIdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") loadAgents(); });
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.className = "status" + (isError ? " error" : "");
+  }
+
+  async function api(path, params) {
+    const qs = new URLSearchParams(params);
+    const resp = await fetch(`${WORKER_URL}${path}?${qs.toString()}`, {
+      headers: { "X-Access-Code": accessCodeInput.value.trim() },
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `Request failed (${resp.status})`);
+    return data;
+  }
+
+  function renderBreadcrumbs() {
+    const parts = [`<a onclick="window.__nav.company()">Company ${escapeHtml(state.companyId)}</a>`];
+    if (state.agent) parts.push(`<a onclick="window.__nav.agent()">${escapeHtml(state.agent.name)}</a>`);
+    if (state.conversation) parts.push(`Conversation ${escapeHtml(state.conversation.conversationId)}`);
+    breadcrumbsEl.innerHTML = parts.join(" &rsaquo; ");
+  }
+
+  window.__nav = {
+    company: () => { state.agent = null; state.conversation = null; loadAgents(); },
+    agent: () => { state.conversation = null; loadConversations(); },
+  };
+
+  async function loadAgents() {
+    const companyId = companyIdInput.value.trim();
+    if (!companyId) return;
+    state = { companyId, agent: null, conversation: null, range: "7d" };
+
+    contentEl.innerHTML = "";
+    breadcrumbsEl.innerHTML = "";
+    setStatus("Loading agents for this company (first lookup can take a few seconds)...", false);
+    loadAgentsBtn.disabled = true;
+
+    try {
+      const data = await api("/api/agents", { companyId });
+      renderBreadcrumbs();
+      if (data.agents.length === 0) {
+        setStatus("No messaging agents found for this company ID.", true);
+        return;
+      }
+      setStatus(`Found ${data.agents.length} agent(s).`, false);
+      contentEl.innerHTML = `<div class="list">${data.agents.map(renderAgentCard).join("")}</div>`;
+      data.agents.forEach((agent, i) => {
+        document.getElementById(`agent-${i}`).addEventListener("click", () => selectAgent(agent));
+      });
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      loadAgentsBtn.disabled = false;
+    }
+  }
+
+  function renderAgentCard(agent, i) {
+    return `
+      <div class="card" id="agent-${i}">
+        <div class="title">${escapeHtml(agent.name)} ${agent.isActive ? "" : "(inactive)"}</div>
+        <div class="meta">${escapeHtml(agent.id)}</div>
+      </div>
+    `;
+  }
+
+  function selectAgent(agent) {
+    state.agent = agent;
+    state.conversation = null;
+    loadConversations();
+  }
+
+  async function loadConversations() {
+    renderBreadcrumbs();
+    setStatus("Loading conversations...", false);
+    contentEl.innerHTML = renderRangePicker();
+    document.querySelectorAll(".range-btn").forEach((btn) => {
+      btn.addEventListener("click", () => { state.range = btn.dataset.range; loadConversations(); });
+    });
+
+    try {
+      const data = await api("/api/conversations", {
+        companyId: state.companyId,
+        agentId: state.agent.id,
+        range: state.range,
+      });
+      setStatus(`Found ${data.conversations.length} conversation(s) in the last ${state.range}.`, false);
+      const listEl = document.createElement("div");
+      listEl.className = "list";
+      listEl.innerHTML = data.conversations.map(renderConversationCard).join("");
+      contentEl.appendChild(listEl);
+      data.conversations.forEach((c, i) => {
+        document.getElementById(`conv-${i}`).addEventListener("click", () => selectConversation(c));
+      });
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  }
+
+  function renderRangePicker() {
+    const ranges = ["24h", "7d", "30d"];
+    return `
+      <div style="margin-bottom:12px; display:flex; gap:8px;">
+        ${ranges.map((r) => `<button class="range-btn secondary" data-range="${r}" style="${r === state.range ? "border-color: var(--accent);" : ""}">${r}</button>`).join("")}
+      </div>
+    `;
+  }
+
+  function renderConversationCard(c, i) {
+    const time = new Date(c.lastActivityAt).toLocaleString();
+    return `
+      <div class="card" id="conv-${i}">
+        <div class="title">${escapeHtml(c.channel.toUpperCase())} &middot; "${escapeHtml(c.lastCustomerMessage || "")}"</div>
+        <div class="meta">${escapeHtml(c.conversationId)} &middot; ${c.turnCount} turn(s) &middot; ${c.totalTokens} tokens &middot; last activity ${time}</div>
+      </div>
+    `;
+  }
+
+  async function selectConversation(conversation) {
+    state.conversation = conversation;
+    renderBreadcrumbs();
+    setStatus("Loading turns...", false);
+    contentEl.innerHTML = "";
+
+    try {
+      const data = await api("/api/turns", { companyId: state.companyId, conversationId: conversation.conversationId });
+      setStatus(`Found ${data.turns.length} turn(s).`, false);
+      const listEl = document.createElement("div");
+      listEl.className = "list";
+      listEl.innerHTML = data.turns.map(renderTurnCard).join("");
+      contentEl.appendChild(listEl);
+      const traceContainer = document.createElement("div");
+      traceContainer.id = "traceContainer";
+      contentEl.appendChild(traceContainer);
+      data.turns.forEach((t, i) => {
+        document.getElementById(`turn-${i}`).addEventListener("click", () => loadTrace(t.requestId));
+      });
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  }
+
+  function renderTurnCard(t, i) {
+    const time = new Date(t.startedAt).toLocaleString();
+    return `
+      <div class="card" id="turn-${i}">
+        <div class="title">Turn at ${time} &middot; ${t.status}${t.finishReason ? ` (${escapeHtml(t.finishReason)})` : ""}</div>
+        <div class="meta">${t.callCount} internal call(s) &middot; ${t.totalTokens} tokens &middot; ${t.durationMs}ms &middot; ${escapeHtml(t.requestId)}</div>
+      </div>
+    `;
+  }
+
+  async function loadTrace(requestId) {
+    const container = document.getElementById("traceContainer");
+    container.innerHTML = `<div class="status">Loading trace...</div>`;
+    try {
+      const data = await api("/api/trace", { companyId: state.companyId, requestId });
+      container.innerHTML = data.trace.interactions.map(renderInteraction).join("");
+    } catch (err) {
+      container.innerHTML = `<div class="status error">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderInteraction(interaction) {
+    const time = new Date(interaction.createdAt).toLocaleString();
+    const kindClass = `kind-${(interaction.callKind || "").toLowerCase()}`;
+    let prompt = tryParse(interaction.prompt);
+    return `
+      <div class="item ${kindClass}">
+        <div class="meta">${escapeHtml(interaction.callKind)} &middot; ${escapeHtml(interaction.model)} &middot; ${interaction.durationMs}ms &middot; ${interaction.tokensUsed ? interaction.tokensUsed.total + " tokens" : ""} &middot; ${time}</div>
+        <details>
+          <summary>System / user prompt</summary>
+          <pre>${escapeHtml(prettyPrint(prompt))}</pre>
+        </details>
+        <details open>
+          <summary>Response</summary>
+          <pre>${escapeHtml(prettyPrint(tryParse(interaction.response)))}</pre>
+        </details>
+      </div>
+    `;
+  }
+
+  function tryParse(value) {
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch { return value; }
+  }
+
+  function prettyPrint(value) {
+    if (value === undefined || value === null) return "(none)";
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  function escapeHtml(str) {
+    return String(str ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+</script>
+</body>
+</html>
